@@ -1,0 +1,17 @@
+{
+  "name": "navi-liquidation-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "bot": "npx tsx navi-bot.ts",
+    "bot:dry": "DRY_RUN=1 npx tsx navi-bot.ts"
+  },
+  "dependencies": {
+    "@mysten/sui": "^1.21.1",
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "ws": "^8.18.0",
+    "@types/ws": "^8.5.14"
+  }
+}
