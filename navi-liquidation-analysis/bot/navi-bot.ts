@@ -56,25 +56,30 @@ interface LiquidationOpp {
 // ── shared state ──────────────────────────────────────────────────────────────
 
 class BotState {
-  prices   = new Map<number, number>();         // asset_id → USD price
-  configs  = new Map<number, AssetConfig>();     // asset_id → config
-  positions= new Map<string, UserPosition>();   // address → position
+  prices        = new Map<number, number>();       // asset_id → USD price
+  configs       = new Map<number, AssetConfig>();  // asset_id → config
+  positions     = new Map<string, UserPosition>(); // address → position
+  triedAddresses= new Set<string>();               // all addresses ever attempted
   // fast tier: positions with HF ≤ HF_SLOW_THRESHOLD
-  fastSet  = new Set<string>();
+  fastSet       = new Set<string>();
 
   computeHF(pos: UserPosition): number {
+    // If any asset has no config we can't compute an accurate HF — skip position
+    for (const id of [...pos.collaterals.keys(), ...pos.debts.keys()]) {
+      if (!this.configs.has(id)) return Infinity;
+    }
     let collatValue = 0;
     for (const [id, raw] of pos.collaterals) {
-      const cfg   = this.configs.get(id);
+      const cfg   = this.configs.get(id)!;
       const price = this.prices.get(id);
-      if (!cfg || !price) continue;
+      if (!price) continue;
       collatValue += (Number(raw) / 10 ** cfg.tokenDec) * price * cfg.liqThreshold;
     }
     let debtValue = 0;
     for (const [id, raw] of pos.debts) {
-      const cfg   = this.configs.get(id);
+      const cfg   = this.configs.get(id)!;
       const price = this.prices.get(id);
-      if (!cfg || !price) continue;
+      if (!price) continue;
       debtValue += (Number(raw) / 10 ** cfg.tokenDec) * price;
     }
     return debtValue === 0 ? Infinity : collatValue / debtValue;
@@ -215,7 +220,7 @@ async function getScaledBalance(tableId: string, address: string): Promise<bigin
 async function getUserInfo(address: string): Promise<{ collaterals: number[]; loans: number[] } | null> {
   try {
     const obj = await client.getObject({ id: NAVI_STORAGE, options: { showContent: true } });
-    const userInfosTableId: string = (obj.data?.content as any)?.fields?.user_infos?.fields?.id?.id;
+    const userInfosTableId: string = (obj.data?.content as any)?.fields?.user_info?.fields?.id?.id;
 
     const df = await client.getDynamicFieldObject({
       parentId: userInfosTableId,
@@ -233,6 +238,7 @@ async function getUserInfo(address: string): Promise<{ collaterals: number[]; lo
 }
 
 async function loadUserPosition(state: BotState, address: string): Promise<void> {
+  state.triedAddresses.add(address);
   try {
     const info = await getUserInfo(address);
     if (!info || (info.collaterals.length === 0 && info.loans.length === 0)) return;
@@ -290,7 +296,8 @@ async function loadPositions(state: BotState) {
       order: "descending",
     });
     for (const ev of res.data) {
-      const addr = (ev.parsedJson as any)?.user;
+      const pj = ev.parsedJson as any;
+      const addr = pj?.sender ?? pj?.user;
       if (addr) borrowers.add(addr);
     }
     if (!res.hasNextPage) break;
@@ -353,28 +360,41 @@ function startPythMonitor(onPrice: PriceCallback) {
 
 async function eventMonitor(state: BotState) {
   const eventType = `${NAVI_PKG}::event::BorrowEvent`;
+
+  // Seed cursor at the most recent event's ID so ascending queries return only future events
   let cursor: any = null;
+  try {
+    const seed = await client.queryEvents({
+      query: { MoveEventType: eventType },
+      limit: 1,
+      order: "descending",
+    });
+    // data[0].id = last seen event — ascending from here means "after this event only"
+    cursor = seed.data[0]?.id ?? null;
+  } catch { /* start from null if seed fails */ }
 
   while (true) {
+    await sleep(10_000);
     try {
       const res = await client.queryEvents({
         query: { MoveEventType: eventType },
         cursor,
-        limit: 20,
+        limit: 50,
         order: "ascending",
       });
       for (const ev of res.data) {
-        const addr = (ev.parsedJson as any)?.user;
-        if (addr && !state.positions.has(addr)) {
+        const pj2 = ev.parsedJson as any;
+        const addr = pj2?.sender ?? pj2?.user;
+        if (addr && !state.triedAddresses.has(addr)) {
           await loadUserPosition(state, addr);
-          log.info(`Tracked new borrower ${addr.slice(0, 20)}...`);
+          if (state.positions.has(addr))
+            log.info(`Tracked new borrower ${addr.slice(0, 20)}...`);
         }
       }
       if (res.hasNextPage) cursor = res.nextCursor;
     } catch (e) {
       log.warn("Event monitor error:", e);
     }
-    await sleep(10_000);
   }
 }
 
@@ -440,10 +460,13 @@ async function hfUpdater(
 // ── liquidator ────────────────────────────────────────────────────────────────
 
 async function liquidator(state: BotState, opp: LiquidationOpp, keypair: Ed25519Keypair | null) {
+  // Note: devInspect for user_health_factor always fails in simulation (NAVI requires
+  // in-PTB Pyth price update, error 1502). Trust local Pyth WebSocket state instead.
+
   if (DRY_RUN) {
     log.info(
-      `[DRY-RUN] Would liquidate ${opp.borrower.slice(0, 16)}...` +
-      ` debtAsset=${opp.debtAsset} collatAsset=${opp.collatAsset}` +
+      `[DRY-RUN] Would liquidate ${opp.borrower.slice(0, 16)}... HF=${opp.hf.toFixed(4)}` +
+      ` debt=${opp.debtAsset} collat=${opp.collatAsset}` +
       ` repay=${opp.repayAmount} profit≈$${opp.profitUsd.toFixed(2)}`
     );
     return;
@@ -454,10 +477,10 @@ async function liquidator(state: BotState, opp: LiquidationOpp, keypair: Ed25519
     return;
   }
 
-  // re-verify HF is still < 1.0 (race condition guard)
+  // re-verify local HF is still < 1.0 (race condition guard)
   const pos = state.positions.get(opp.borrower);
   if (!pos || pos.hf >= 1.0) {
-    log.debug(`Skip ${opp.borrower.slice(0, 16)}...: HF recovered`);
+    log.debug(`Skip ${opp.borrower.slice(0, 16)}...: local HF recovered to ${pos?.hf.toFixed(4)}`);
     return;
   }
 
