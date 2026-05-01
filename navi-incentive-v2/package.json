@@ -1,0 +1,15 @@
+{
+  "name": "navi-incentive-v2-research",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "poc": "node --loader ts-node/esm poc-v2-comparison.ts"
+  },
+  "dependencies": {
+    "@mysten/sui": "^1.21.1",
+    "@types/node": "^25.6.0",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}
