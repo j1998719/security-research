@@ -19,7 +19,7 @@ import { Transaction }      from "@mysten/sui/transactions";
 import { SuiClient }        from "@mysten/sui/client";
 import { Ed25519Keypair }   from "@mysten/sui/keypairs/ed25519";
 import { NetworkAddrs }     from "./network.js";
-import { CLOCK, GAS_BUDGET_MIST } from "./config.js";
+import { CLOCK, GAS_BUDGET_MIST, AUTO_SWAP } from "./config.js";
 
 const { flashloanPTB, repayFlashLoanPTB } =
   await import("@naviprotocol/lending" as any) as any;
@@ -35,10 +35,11 @@ export interface LiqOpp {
   repayAmount: bigint;
   profitUsd:   number;
   hf:          number;
+  minSuiOut?:  bigint;  // wallet-swap: min SUI from collat→SUI pool (0n = no sell-back)
 }
 
-type Source = "cetus" | "cetus-multi" | "navi" | "wallet";
-export type LiquidationMode = "cetus" | "cetus-multi" | "navi-flash" | "wallet" | "auto";
+type Source = "cetus" | "cetus-multi" | "navi" | "wallet" | "wallet-swap";
+export type LiquidationMode = "cetus" | "cetus-multi" | "navi-flash" | "wallet" | "wallet-swap" | "auto";
 
 // ── routing ───────────────────────────────────────────────────────────────────
 
@@ -48,9 +49,9 @@ interface RouteResult {
   pool?:        string;
   poolIsv?:     number;
   a2b?:         boolean;
-  // Multi-hop Cetus: two pools (borrow debtCoin via SUI pivot)
+  // Multi-hop Cetus or wallet-swap: two pools (debt/SUI + collat/SUI)
   borrowPool?:  { id: string; isv: number; a2b: boolean };
-  swapPool?:    { id: string; isv: number; a2b: boolean };
+  swapPool?:    { id: string; isv: number; a2b: boolean };  // optional for wallet-swap
 }
 
 function selectSource(
@@ -102,10 +103,29 @@ function selectSource(
     }
   }
 
-  // 3. NAVI flash loan: only useful when debt == collat (same coin type, currently blocked by alias check)
+  // 3. Wallet-swap via Cetus (AUTO_SWAP=true): buy debt with wallet SUI, sell collat for SUI.
+  // Only fires when no flash path was found above (i.e., cetus-multi pools are not both registered).
+  // Requires debt/SUI Cetus pool. collat/SUI pool optional (if absent, keep collatTokens).
+  if (AUTO_SWAP && debtType !== SUI_TYPE) {
+    const debtSuiPool = findSuiPool(debtType);
+    if (debtSuiPool) {
+      const collatSuiPool = collatType !== SUI_TYPE ? findSuiPool(collatType) : null;
+      // a2b for swapPool: sell collatCoin to get SUI
+      const swapA2b = collatType !== SUI_TYPE && addrs.CETUS_POOLS[`${collatType},${SUI_TYPE}`] ? true : false;
+      return {
+        source:     "wallet-swap",
+        borrowPool: { id: debtSuiPool.id, isv: debtSuiPool.isv, a2b: debtSuiPool.a2b },
+        swapPool:   collatSuiPool
+          ? { id: collatSuiPool.id, isv: collatSuiPool.isv, a2b: swapA2b }
+          : undefined,
+      };
+    }
+  }
+
+  // 4. NAVI flash loan: only useful when debt == collat (same coin type, currently blocked by alias check)
   if (debtType === collatType) return { source: "navi" };
 
-  // 4. Wallet fallback
+  // 5. Wallet fallback
   return { source: "wallet" };
 }
 
@@ -431,6 +451,152 @@ async function addWalletLiquidation(
   tx.transferObjects([collatCoin, excessDebtCoin], tx.pure.address(sender));
 }
 
+// ── wallet-swap path ──────────────────────────────────────────────────────────
+//
+// Used when no flash path exists but debt/SUI Cetus pool is available.
+// Route:
+//   flash_swap(debtSuiPool, borrow exact debtAmount)
+//   → liquidation_v2 (pay debt, receive collat)
+//   → repay debtSuiPool with SUI from tx.gas (wallet pays)
+//   → optionally flash_swap(collatSuiPool, sell collat for ≥ minSuiOut SUI)
+//   → repay collatSuiPool with collat from liquidation proceeds
+//   → transfer remaining collat + SUI profit to sender
+
+function addWalletSwapLiquidation(
+  tx:          Transaction,
+  opp:         LiqOpp,
+  debtPool:    { id: string; isv: number; coinType: string },
+  collatPool:  { id: string; isv: number; coinType: string },
+  borrowCetus: { id: string; isv: number; a2b: boolean },  // debt/SUI pool; a2b to get debtCoin
+  swapCetus:   { id: string; isv: number; a2b: boolean } | undefined,  // collat/SUI pool
+  minSuiOut:   bigint,
+  addrs:       NetworkAddrs,
+  sender:      string,
+): void {
+  const SUI_TYPE = "0x2::sui::SUI";
+  const cfg      = addrs.CETUS_GLOBAL_CONFIG;
+
+  // borrowPool typeArgs: a2b=true → [SUI, debt]; a2b=false → [debt, SUI]
+  const borrowTypeArgs = borrowCetus.a2b
+    ? [SUI_TYPE,          debtPool.coinType]
+    : [debtPool.coinType, SUI_TYPE];
+  const sqrtBorrowLimit = borrowCetus.a2b ? MIN_SQRT_PRICE : MAX_SQRT_PRICE;
+
+  // ── Step 1: flash borrow exact repayAmount debt; pool will want SUI back ────
+  const [borrowBalA, borrowBalB, borrowReceipt] = tx.moveCall({
+    target: `${addrs.CETUS_PKG}::pool::flash_swap`,
+    typeArguments: borrowTypeArgs,
+    arguments: [
+      tx.sharedObjectRef({ objectId: cfg.id, initialSharedVersion: cfg.isv, mutable: false }),
+      tx.sharedObjectRef({ objectId: borrowCetus.id, initialSharedVersion: borrowCetus.isv, mutable: true }),
+      tx.pure.bool(borrowCetus.a2b),
+      tx.pure.bool(false),              // exact output = repayAmount
+      tx.pure.u64(opp.repayAmount),
+      tx.pure.u128(sqrtBorrowLimit),
+      tx.object(CLOCK),
+    ],
+  });
+  // a2b=true → [SUI,debt]: balA=0(SUI owed), balB=debtAmount
+  // a2b=false → [debt,SUI]: balA=debtAmount, balB=0(SUI owed)
+  const [balDebt, balZeroSui1] = borrowCetus.a2b
+    ? [borrowBalB, borrowBalA]
+    : [borrowBalA, borrowBalB];
+  tx.moveCall({ target: "0x2::balance::destroy_zero", typeArguments: [SUI_TYPE], arguments: [balZeroSui1] });
+
+  // ── Step 2: NAVI liquidation_v2 ─────────────────────────────────────────────
+  const [balCollat, balExcessDebt] = addNaviLiquidationCall(
+    tx, opp, balDebt, debtPool, collatPool, addrs,
+  );
+
+  // ── Step 3: how much SUI must we pay back to borrowPool? ────────────────────
+  const [suiOwed] = tx.moveCall({
+    target: `${addrs.CETUS_PKG}::pool::swap_pay_amount`,
+    typeArguments: borrowTypeArgs,
+    arguments: [borrowReceipt],
+  });
+
+  // ── Step 4: pay borrowPool SUI from wallet gas coin ─────────────────────────
+  const suiRepayBal  = tx.moveCall({
+    target: "0x2::coin::into_balance",
+    typeArguments: [SUI_TYPE],
+    arguments: [tx.splitCoins(tx.gas, [suiOwed])[0]],
+  });
+  const zeroDebtBal  = tx.moveCall({ target: "0x2::balance::zero", typeArguments: [debtPool.coinType], arguments: [] });
+  const [repayBorrowA, repayBorrowB] = borrowCetus.a2b
+    ? [suiRepayBal, zeroDebtBal]  // a2b=true → [SUI,debt]: repay coinA=SUI
+    : [zeroDebtBal, suiRepayBal]; // a2b=false → [debt,SUI]: repay coinB=SUI
+  tx.moveCall({
+    target: `${addrs.CETUS_PKG}::pool::repay_flash_swap`,
+    typeArguments: borrowTypeArgs,
+    arguments: [
+      tx.sharedObjectRef({ objectId: cfg.id, initialSharedVersion: cfg.isv, mutable: false }),
+      tx.sharedObjectRef({ objectId: borrowCetus.id, initialSharedVersion: borrowCetus.isv, mutable: true }),
+      repayBorrowA, repayBorrowB, borrowReceipt,
+    ],
+  });
+
+  const collatCoin     = tx.moveCall({ target: "0x2::coin::from_balance", typeArguments: [collatPool.coinType], arguments: [balCollat] });
+  const excessDebtCoin = tx.moveCall({ target: "0x2::coin::from_balance", typeArguments: [debtPool.coinType],   arguments: [balExcessDebt] });
+
+  // ── Steps 5-8: sell collat for SUI (only when collat/SUI pool registered) ───
+  if (swapCetus && minSuiOut > 0n) {
+    // swapCetus.a2b=true → [collat,SUI]: sell coinA=collat, get coinB=SUI
+    // swapCetus.a2b=false → [SUI,collat]: sell coinB=collat, get coinA=SUI
+    const swapTypeArgs  = swapCetus.a2b
+      ? [collatPool.coinType, SUI_TYPE]
+      : [SUI_TYPE,            collatPool.coinType];
+    const sqrtSwapLimit = swapCetus.a2b ? MIN_SQRT_PRICE : MAX_SQRT_PRICE;
+
+    const [swapBalA, swapBalB, swapReceipt] = tx.moveCall({
+      target: `${addrs.CETUS_PKG}::pool::flash_swap`,
+      typeArguments: swapTypeArgs,
+      arguments: [
+        tx.sharedObjectRef({ objectId: cfg.id, initialSharedVersion: cfg.isv, mutable: false }),
+        tx.sharedObjectRef({ objectId: swapCetus.id, initialSharedVersion: swapCetus.isv, mutable: true }),
+        tx.pure.bool(swapCetus.a2b),
+        tx.pure.bool(false),          // exact SUI output = minSuiOut
+        tx.pure.u64(minSuiOut),
+        tx.pure.u128(sqrtSwapLimit),
+        tx.object(CLOCK),
+      ],
+    });
+    // a2b=true → balA=0(collat owed), balB=SUI
+    // a2b=false → balA=SUI, balB=0(collat owed)
+    const [balSuiOut, balZeroCollat] = swapCetus.a2b
+      ? [swapBalB, swapBalA]
+      : [swapBalA, swapBalB];
+    tx.moveCall({ target: "0x2::balance::destroy_zero", typeArguments: [collatPool.coinType], arguments: [balZeroCollat] });
+
+    const [collatCost] = tx.moveCall({
+      target: `${addrs.CETUS_PKG}::pool::swap_pay_amount`,
+      typeArguments: swapTypeArgs,
+      arguments: [swapReceipt],
+    });
+
+    const collatRepayCoin = tx.splitCoins(collatCoin, [collatCost])[0];
+    const collatRepayBal  = tx.moveCall({ target: "0x2::coin::into_balance", typeArguments: [collatPool.coinType], arguments: [collatRepayCoin] });
+    const zeroSuiBal      = tx.moveCall({ target: "0x2::balance::zero", typeArguments: [SUI_TYPE], arguments: [] });
+    const [swapRepayA, swapRepayB] = swapCetus.a2b
+      ? [collatRepayBal, zeroSuiBal]
+      : [zeroSuiBal,     collatRepayBal];
+    tx.moveCall({
+      target: `${addrs.CETUS_PKG}::pool::repay_flash_swap`,
+      typeArguments: swapTypeArgs,
+      arguments: [
+        tx.sharedObjectRef({ objectId: cfg.id, initialSharedVersion: cfg.isv, mutable: false }),
+        tx.sharedObjectRef({ objectId: swapCetus.id, initialSharedVersion: swapCetus.isv, mutable: true }),
+        swapRepayA, swapRepayB, swapReceipt,
+      ],
+    });
+
+    const suiOutCoin = tx.moveCall({ target: "0x2::coin::from_balance", typeArguments: [SUI_TYPE], arguments: [balSuiOut] });
+    tx.transferObjects([collatCoin, suiOutCoin, excessDebtCoin], tx.pure.address(sender));
+  } else {
+    // No collat/SUI pool: keep collatTokens as profit
+    tx.transferObjects([collatCoin, excessDebtCoin], tx.pure.address(sender));
+  }
+}
+
 // ── shared: NAVI liquidation_v2 call ─────────────────────────────────────────
 
 function addNaviLiquidationCall(
@@ -499,6 +665,9 @@ export async function buildLiquidationTx(
     route = { source: "wallet" };
   } else if (mode === "navi-flash") {
     route = { source: "navi" };
+  } else if (mode === "wallet-swap") {
+    route = selectSource(debtPool.coinType, collatPool.coinType, addrs, false);
+    if (route.source !== "wallet-swap") throw new Error(`No wallet-swap route for ${opp.debtAsset}→${opp.collatAsset}`);
   } else if (mode === "cetus") {
     route = selectSource(debtPool.coinType, collatPool.coinType, addrs, false);
     if (route.source !== "cetus") throw new Error(`No direct Cetus pool for ${opp.debtAsset}→${opp.collatAsset}`);
@@ -508,7 +677,7 @@ export async function buildLiquidationTx(
   } else {
     // auto: honour opp.source from bestLiquidation if available, else selectSource
     const autoMode = (opp as any).source as string | undefined;
-    if (autoMode === "cetus-multi") {
+    if (autoMode === "wallet-swap" || autoMode === "cetus-multi") {
       route = selectSource(debtPool.coinType, collatPool.coinType, addrs, false);
     } else {
       const hasCash = opp.debtAsset === 0;
@@ -520,6 +689,14 @@ export async function buildLiquidationTx(
     addCetusFlashLiquidation(tx, opp, debtPool, collatPool, { id: route.pool!, isv: route.poolIsv! }, route.a2b!, addrs, sender);
   } else if (route.source === "cetus-multi") {
     addCetusMultiHopFlashLiquidation(tx, opp, debtPool, collatPool, route.borrowPool!, route.swapPool!, addrs, sender);
+  } else if (route.source === "wallet-swap") {
+    addWalletSwapLiquidation(
+      tx, opp, debtPool, collatPool,
+      route.borrowPool!,
+      route.swapPool,
+      (opp as any).minSuiOut ?? 0n,
+      addrs, sender,
+    );
   } else if (route.source === "navi") {
     await addNaviFlashLiquidation(tx, opp, debtPool, collatPool, addrs, sender);
   } else {

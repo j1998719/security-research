@@ -139,6 +139,15 @@ export const MAINNET: NetworkAddrs = {
     // NS / SUI  fee=1%
     "0x5145494a5f5100e645e4b0aa950fa6b68f614e8c59e17bc5ded3495123a79178::ns::NS,0x2::sui::SUI":
       { id: "0x763f63cbada3a932c46972c6c6dcf1abd8a9a73331908a1d7ef24c2232d85520", isv: 416502635, coinA: "0x5145494a5f5100e645e4b0aa950fa6b68f614e8c59e17bc5ded3495123a79178::ns::NS", coinB: "0x2::sui::SUI", feeBps: 100 },
+    // WETH(wormhole) / SUI  fee=0.05%
+    "0xaf8cd5edc19c4512f4259f0bee101a40d41ebed738ade5874359610ef8eeced5::coin::COIN,0x2::sui::SUI":
+      { id: "0xbf6e8d5e563a76906cd69035360f886ed56642f764b5f77a96b85b118584abdd", isv: 2871171,   coinA: "0xaf8cd5edc19c4512f4259f0bee101a40d41ebed738ade5874359610ef8eeced5::coin::COIN", coinB: "0x2::sui::SUI", feeBps: 5 },
+    // DEEP / SUI  fee=0.05%
+    "0xdeeb7a4662eec9f2f3def03fb937a663dddaa2e215b8078a284d026b7946c270::deep::DEEP,0x2::sui::SUI":
+      { id: "0xd978d331772a5b90d5a4781e1232d18afd12019d0c35db79e3674beeda8f9126", isv: 389638435, coinA: "0xdeeb7a4662eec9f2f3def03fb937a663dddaa2e215b8078a284d026b7946c270::deep::DEEP", coinB: "0x2::sui::SUI", feeBps: 5 },
+    // CETUS / SUI  fee=0.01%  (key uses NAVI's non-padded address)
+    "0x6864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS,0x2::sui::SUI":
+      { id: "0xdfbd4b39f65532d8b2c1136d1ddbf7dde037720067680e956076defd65753918", isv: 1964492,   coinA: "0x6864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS", coinB: "0x2::sui::SUI", feeBps: 1 },
   },
 
   // Sourced from https://open-api.naviprotocol.io/api/navi/config?env=prod&market=main → oracle.feeds

@@ -12,6 +12,7 @@ import { SuiClient }            from "@mysten/sui/client";
 import { writeFileSync, readFileSync } from "fs";
 import {
   ASSETS, RAY, HF_SLOW_THRESHOLD, GAS_WALLET_MIST, GAS_FLASH_MIST, MIN_PROFIT_USD,
+  AUTO_SWAP, MAX_SLIPPAGE_BPS,
 } from "./config.js";
 import { RpcPool } from "./network.js";
 import type { NetworkAddrs } from "./network.js";
@@ -45,7 +46,7 @@ export interface LiquidationOpp {
   //   "cetus"       — direct flash_swap on one pool (debt↔collat)
   //   "cetus-multi" — 2-pool flash: borrow debt via debt/SUI pool, swap collat→SUI to repay
   //   "wallet"      — direct spend from bot wallet (requires holding debt coin)
-  source:        "cetus" | "cetus-multi" | "wallet";
+  source:        "cetus" | "cetus-multi" | "wallet" | "wallet-swap";
   viaAsset?:     number;   // pivot asset for cetus-multi (always SUI=0 for now)
   // Profit breakdown (all in USD)
   grossProfitUsd: number;
@@ -53,6 +54,7 @@ export interface LiquidationOpp {
   gasCostUsd:     number;
   profitUsd:      number;
   hf:             number;
+  minSuiOut?:     bigint;  // wallet-swap: min SUI to accept from collat→SUI pool (0n if no collat pool)
 }
 
 interface CacheEntry {
@@ -232,6 +234,46 @@ export class BotState {
             const profitUsd     = grossProfitUsd - cetusFeeUsd - gasCostUsd;
             if (profitUsd > minProfit && (!bestFlash || profitUsd > bestFlash.profitUsd)) {
               bestFlash = { borrower: pos.address, debtAsset: debtId, collatAsset: collatId, repayAmount: repayRaw, source: "cetus-multi", viaAsset: 0, grossProfitUsd, cetusFeeUsd, gasCostUsd, profitUsd, hf: pos.hf };
+            }
+          }
+        }
+
+        // ── Wallet-swap (auto_swap=true): buy debt with wallet SUI via Cetus ──
+        // Fires only when no flash path is available (no direct or multi-hop pool).
+        // Requires debt/SUI Cetus pool. collat/SUI pool is optional (if missing, collat kept as-is).
+        if (AUTO_SWAP && debtCoinType !== suiCoinType) {
+          const borrowFeeBps = cetusFeeBps(debtCoinType, suiCoinType);
+          if (borrowFeeBps !== undefined) {
+            // No existing flash path should already cover this (cetus-multi requires both pools).
+            const swapFeeBps     = cetusFeeBps(collatCoinType, suiCoinType);
+            const slipFrac       = MAX_SLIPPAGE_BPS / 10000;
+            // Fee on buying debt: charged on debt value
+            const borrowFeeUsd   = repayUsd * borrowFeeBps / 10000;
+            // Slippage cost on buy side
+            const buySlipUsd     = repayUsd * slipFrac;
+            // Fee + slippage on selling collat (only if collat/SUI pool exists)
+            const sellFeeUsd     = swapFeeBps !== undefined
+              ? receivedUsd * swapFeeBps / 10000 + receivedUsd * slipFrac
+              : 0;
+            const gasCostUsd     = (Number(GAS_FLASH_MIST) / 1e9) * suiPrice;
+            const cetusFeeUsd    = borrowFeeUsd + buySlipUsd + sellFeeUsd;
+            const profitUsd      = grossProfitUsd - cetusFeeUsd - gasCostUsd;
+            if (profitUsd > minProfit && (!bestFlash || profitUsd > bestFlash.profitUsd)) {
+              // minSuiOut: conservative SUI floor for the collat→SUI flash swap
+              const minSuiOut = swapFeeBps !== undefined
+                ? BigInt(Math.floor(
+                    receivedUsd / suiPrice
+                    * (1 - swapFeeBps / 10000)
+                    * (1 - slipFrac)
+                    * 1e9
+                  ))
+                : 0n;
+              bestFlash = {
+                borrower: pos.address, debtAsset: debtId, collatAsset: collatId,
+                repayAmount: repayRaw, source: "wallet-swap",
+                grossProfitUsd, cetusFeeUsd, gasCostUsd, profitUsd, hf: pos.hf,
+                minSuiOut,
+              };
             }
           }
         }

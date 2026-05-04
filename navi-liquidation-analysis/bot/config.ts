@@ -20,6 +20,7 @@ interface ConfigJson {
   gas_budget_mist:   number;
   hf_slow_threshold: number;
   slow_interval_ms:  number;
+  auto_swap:         boolean;
   sui_rpcs:          string[];
   telegram_token:    string;
   telegram_chat:     string;
@@ -41,6 +42,7 @@ export const GAS_FLASH_MIST     = BigInt(_cfg.gas_flash_mist);
 export const GAS_BUDGET_MIST    = BigInt(_cfg.gas_budget_mist);
 export const HF_SLOW_THRESHOLD  = _cfg.hf_slow_threshold;
 export const SLOW_INTERVAL_MS   = _cfg.slow_interval_ms;
+export const AUTO_SWAP          = _cfg.auto_swap;
 
 // Network / integration
 export const SUI_RPCS        = _cfg.sui_rpcs;
