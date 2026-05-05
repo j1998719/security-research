@@ -88,13 +88,27 @@ export const MAINNET: NetworkAddrs = {
     4:  { id: "0x3c376f857ec4247b8ee456c1db19e9c74e0154d4876915e54221b5052d5b1e2e", isv: 40406925,  coinType: "0x6864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS" },
     5:  { id: "0x9790c2c272e15b6bf9b341eb531ef16bcc8ed2b20dfda25d060bf47f5dd88d01", isv: 41591100,  coinType: "0x549e8b69270defbfafd4f94e17ec44cdbdd99820b33bda2278dea3b9a32d3f55::cert::CERT" },
     6:  { id: "0x6fd9cb6ebd76bc80340a9443d72ea0ae282ee20e2fd7544f6ffcd2c070d9557a", isv: 43495349,  coinType: "0xbde4ba4c2e274a60ce15c1cfff9e5c42e41654ac8b6d906a57efa4bd3c29f47d::hasui::HASUI" },
+    7:  { id: "0xc0e02e7a245e855dd365422faf76f87d9f5b2148a26d48dda6e8253c3fe9fa60", isv: 70760701,  coinType: "0xa99b8952d4f7d947ea77fe0ecdcc9e5fc0bcab2841d6e2a5aa00c3044e5544b5::navx::NAVX" },
+    8:  { id: "0xd162cbe40f8829ce71c9b3d3bf3a83859689a79fa220b23d70dc0300b777ae6e", isv: 333884382, coinType: "0x027792d9fed7f9844eb4839566001bb6f6cb4804f66aa2da6fe1ee242d896881::coin::COIN" },
+    9:  { id: "0xc9208c1e75f990b2c814fa3a45f1bf0e85bb78404cfdb2ae6bb97de58bb30932", isv: 338663325, coinType: "0x2053d08c1e2bd02791056171aab0fd12bd7cd7efad2ab8f6b9c8902f14df2ff2::ausd::AUSD" },
     10: { id: "0xa3582097b4c57630046c0c49a88bfc6b202a3ec0a9db5597c31765f7563755a8", isv: 372449049, coinType: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC" },
     11: { id: "0x78ba01c21d8301be15690d3c30dc9f111871e38cfb0b2dd4b70cc6052fba41bb", isv: 389514995, coinType: "0xd0e89b2af5e4910726fbcd8b8dd37bb79b29e5f83f7491bca830e94f7f226d29::eth::ETH" },
+    12: { id: "0x4b6253a9f8cf7f5d31e6d04aed4046b9e325a1681d34e0eff11a8441525d4563", isv: 395476620, coinType: "0x960b531667636f39e85867775f52f6b1f220a058c4de786905bdf761e06a56bb::usdy::USDY" },
     13: { id: "0x2fcc6245f72795fad50f17c20583f8c6e81426ab69d7d3590420571364d080d4", isv: 416632453, coinType: "0x5145494a5f5100e645e4b0aa950fa6b68f614e8c59e17bc5ded3495123a79178::ns::NS" },
     14: { id: "0xd96dcd6982c45e580c83ff1d96c2b4455a874c284b637daf67c0787f25bc32dd", isv: 421393626, coinType: "0x5f496ed5d9d045c5b788dc1bb85f54100f2ede11e46f6a232c29daada4c5bdb6::coin::COIN" },
+    15: { id: "0x08373c5efffd07f88eace1c76abe4777489d9ec044fd4cd567f982d9c169e946", isv: 443050989, coinType: "0xdeeb7a4662eec9f2f3def03fb937a663dddaa2e215b8078a284d026b7946c270::deep::DEEP" },
+    16: { id: "0x38d8ac76efc14035bbc8c8b38803f5bd012a0f117d9a0bad2103f8b2c6675b66", isv: 446180423, coinType: "0xf16e6b723f242ec745dfd7634ad072c42d5c1d9ac9d62a39c381303eaa57693a::fdusd::FDUSD" },
+    17: { id: "0xe2cfd1807f5b44b44d7cabff5376099e76c5f0e4b35a01bdc4b0ef465a23e32c", isv: 453676842, coinType: "0xe1b45a0e641b9955a20aa0ad1c1f4ad86aad8afb07296d4085e349a50e90bdca::blue::BLUE" },
     18: { id: "0x98953e1c8af4af0cd8f59a52f9df6e60c9790b8143f556751f10949b40c76c50", isv: 458949105, coinType: "0xce7ff77a83ea0cb6fd39bd8748e2ec89a3f41e8efdc3f4eb123e0ca37b184db2::buck::BUCK" },
+    19: { id: "0xa3e0471746e5d35043801bce247d3b3784cc74329d39f7ed665446ddcf22a9e2", isv: 464441251, coinType: "0x375f70cf2ae4c00bf37117d0c85a2c71545e6ee05c4a5c7d282cd66a4504b068::usdt::USDT" },
+    20: { id: "0x0bccd5189d311002f4e10dc98270a3362fb3f7f9d48164cf40828f6c09f351e2", isv: 477977475, coinType: "0xd1b72982e40348d069bb1ff701e634c117bb5f741f44dff91e472d3b01461e55::stsui::STSUI" },
     21: { id: "0x348f4049063e6c4c860064d67a170a7b3de033db9d67545d98fa5da3999966bc", isv: 488787610, coinType: "0xaafb102dd0902f5055cadecd687fb5b71ca82ef0e0285d90afde828ec58ca96b::btc::BTC" },
+    22: { id: "0xac5f6d750063244cc5abceef712b7ea1aa377f73762099b31c0051a842c13b10", isv: 499627809, coinType: "0xb7844e289a8410e50fb3ca48d69eb9cf29e27d223ef90353fe1bd8e27ff8f3f8::coin::COIN" },
+    23: { id: "0x377b8322c0d349b44b5873d418192eefe871b9372bb3a86f288cafe97317de04", isv: 502157841, coinType: "0x3e8e9423d80e1774a7ca128fccd8bf5f1f7753be658c5e645929037f7c819040::lbtc::LBTC" },
     24: { id: "0xef76883525f5c2ff90cd97732940dbbdba0b391e29de839b10588cee8e4fe167", isv: 510342415, coinType: "0x356a26eb9e012a68958082340d4c4116e7f55615cf27affcff209cf0ae544f59::wal::WAL" },
+    25: { id: "0x930f5cf61dcb66d699ba57b2eb72da6fd04c64a53073cc40f751ef12c77aaa6a", isv: 553514320, coinType: "0x3a304c7feba2d819ea57c3542d68439ca2c386ba02159c740f7b406e592c62ea::haedal::HAEDAL" },
+    26: { id: "0xd9c9a1d8a2f82d752d4f2504c1097636bbe7f0f335a89be85f65fb32dc6b1866", isv: 561891682, coinType: "0x876a4b7bce8aeaef60464c11f4026903e9afacab79b9b142686158aa86560b50::xbtc::XBTC" },
+    27: { id: "0x3566577feaba2f24b9e0b315a10f1afe04e7d275c2da6f28caeba095d00dee8d", isv: 598802816, coinType: "0x7262fb2f7a3a14c888c438a3cd9b912469a58cf60f367352c46584262e8299aa::ika::IKA" },
     31: { id: "0x33b2924f2b7e12112a134ad69d9f2b3565c316b0a756e328abe9914c8deca034", isv: 627498153, coinType: "0x9d297676e7a4b771ab023291377b2adfaa4938fb9080b8d12430e4b108b836a9::xaum::XAUM" },
     32: { id: "0x88fb36f9ab1ac2a47a974c53daf5ef37862e063f4875bf54e5853e2ca1e9ddad", isv: 703606404, coinType: "0x0041f9f9344cac094454cd574e333c4fdb132d7bcc9379bcd4aab485b2a63942::wbtc::WBTC" },
     33: { id: "0x86d663fdba9690cb4edf0b29140c31bad8c98d43b3eac70050c237c0d1434334", isv: 784526613, coinType: "0x41d587e5336f1c86cad50d38a7136db99333bb9bda91cea4ba69115defeb1402::sui_usde::SUI_USDE" },
@@ -121,6 +135,9 @@ export const MAINNET: NetworkAddrs = {
     // haSUI / SUI  fee=0.05% (LST pair)
     "0xbde4ba4c2e274a60ce15c1cfff9e5c42e41654ac8b6d906a57efa4bd3c29f47d::hasui::HASUI,0x2::sui::SUI":
       { id: "0x871d8a227114f375170f149f7e9d45be822dd003eba225e83c05ac80828596bc", isv: 29297877,  coinA: "0xbde4ba4c2e274a60ce15c1cfff9e5c42e41654ac8b6d906a57efa4bd3c29f47d::hasui::HASUI", coinB: "0x2::sui::SUI", feeBps: 5 },
+    // LBTC2 / SUI  fee=0.25%
+    "0x3e8e9423d80e1774a7ca128fccd8bf5f1f7753be658c5e645929037f7c819040::lbtc::LBTC,0x2::sui::SUI":
+      { id: "0x2fc6ee9183d0f1ca0d2dded02c416be6f4671bb82db55c26ce12b536812a4b8e", isv: 500039347, coinA: "0x3e8e9423d80e1774a7ca128fccd8bf5f1f7753be658c5e645929037f7c819040::lbtc::LBTC", coinB: "0x2::sui::SUI", feeBps: 25 },
     // WAL / SUI  fee=1%
     "0x356a26eb9e012a68958082340d4c4116e7f55615cf27affcff209cf0ae544f59::wal::WAL,0x2::sui::SUI":
       { id: "0x72f5c6eef73d77de271886219a2543e7c29a33de19a6c69c5cf1899f729c3f17", isv: 510321353, coinA: "0x356a26eb9e012a68958082340d4c4116e7f55615cf27affcff209cf0ae544f59::wal::WAL", coinB: "0x2::sui::SUI", feeBps: 100 },
@@ -145,6 +162,57 @@ export const MAINNET: NetworkAddrs = {
     // DEEP / SUI  fee=0.05%
     "0xdeeb7a4662eec9f2f3def03fb937a663dddaa2e215b8078a284d026b7946c270::deep::DEEP,0x2::sui::SUI":
       { id: "0xd978d331772a5b90d5a4781e1232d18afd12019d0c35db79e3674beeda8f9126", isv: 389638435, coinA: "0xdeeb7a4662eec9f2f3def03fb937a663dddaa2e215b8078a284d026b7946c270::deep::DEEP", coinB: "0x2::sui::SUI", feeBps: 5 },
+    // USDC / HAEDAL(NAVI)  fee=0.25%  — 69T liquidity; used for two-hop HAEDAL→USDC→SUI
+    "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC,0x3a304c7feba2d819ea57c3542d68439ca2c386ba02159c740f7b406e592c62ea::haedal::HAEDAL":
+      { id: "0x711f5d37e3b09b026b182d9e0973d05e9a837d11066ff48f4a55a426d8913359", isv: 506307791, coinA: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", coinB: "0x3a304c7feba2d819ea57c3542d68439ca2c386ba02159c740f7b406e592c62ea::haedal::HAEDAL", feeBps: 25 },
+    // BUCK / SUI  fee=0.01% (ts=2, tightest BUCK/SUI pool)
+    "0xce7ff77a83ea0cb6fd39bd8748e2ec89a3f41e8efdc3f4eb123e0ca37b184db2::buck::BUCK,0x2::sui::SUI":
+      { id: "0xf502e9fe6694d342fa490e69de97d19234fbacff9bb54ece48c808e346fe5562", isv: 422612425, coinA: "0xce7ff77a83ea0cb6fd39bd8748e2ec89a3f41e8efdc3f4eb123e0ca37b184db2::buck::BUCK", coinB: "0x2::sui::SUI", feeBps: 1 },
+    // USDC / BUCK  fee=0.01% (ts=2)
+    "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC,0xce7ff77a83ea0cb6fd39bd8748e2ec89a3f41e8efdc3f4eb123e0ca37b184db2::buck::BUCK":
+      { id: "0x4c50ba9d1e60d229800293a4222851c9c3f797aa5ba8a8d32cc67ec7e79fec60", isv: 373908232, coinA: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", coinB: "0xce7ff77a83ea0cb6fd39bd8748e2ec89a3f41e8efdc3f4eb123e0ca37b184db2::buck::BUCK", feeBps: 1 },
+    // ETH / SUI  fee=0.01% (ts=1, tightest ETH/SUI pool)
+    "0xd0e89b2af5e4910726fbcd8b8dd37bb79b29e5f83f7491bca830e94f7f226d29::eth::ETH,0x2::sui::SUI":
+      { id: "0x20f14d2592cf6af30fe3edb2fc34ab13fcadf68a5beac7d89637cc1d4a3f0b63", isv: 557777470, coinA: "0xd0e89b2af5e4910726fbcd8b8dd37bb79b29e5f83f7491bca830e94f7f226d29::eth::ETH", coinB: "0x2::sui::SUI", feeBps: 1 },
+    // USDC / ETH  fee=0.01% (ts=2)
+    "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC,0xd0e89b2af5e4910726fbcd8b8dd37bb79b29e5f83f7491bca830e94f7f226d29::eth::ETH":
+      { id: "0xc83603f8a0693b2a9e753d4f8de68076db51f73603b83696c4f8febb9efa51d6", isv: 551213540, coinA: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", coinB: "0xd0e89b2af5e4910726fbcd8b8dd37bb79b29e5f83f7491bca830e94f7f226d29::eth::ETH", feeBps: 1 },
+    // BTC2(COIN) / SUI  fee=1% (ts=200, only available pool)
+    "0x5f496ed5d9d045c5b788dc1bb85f54100f2ede11e46f6a232c29daada4c5bdb6::coin::COIN,0x2::sui::SUI":
+      { id: "0x5a43a4388205053fc790d9139b3e7d5fb251f5fe21944d1bd2d6ed48a6f2f7ef", isv: 438501534, coinA: "0x5f496ed5d9d045c5b788dc1bb85f54100f2ede11e46f6a232c29daada4c5bdb6::coin::COIN", coinB: "0x2::sui::SUI", feeBps: 100 },
+    // USDC / BTC2(COIN)  fee=0.25% (ts=60)
+    "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC,0x5f496ed5d9d045c5b788dc1bb85f54100f2ede11e46f6a232c29daada4c5bdb6::coin::COIN":
+      { id: "0xa3184e984c2668ffa60b232485b69523a2c36baf5ef82f8534e8fcac88d71360", isv: 430656259, coinA: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", coinB: "0x5f496ed5d9d045c5b788dc1bb85f54100f2ede11e46f6a232c29daada4c5bdb6::coin::COIN", feeBps: 25 },
+    // BTC / SUI  fee=0.25% (ts=60)
+    "0xaafb102dd0902f5055cadecd687fb5b71ca82ef0e0285d90afde828ec58ca96b::btc::BTC,0x2::sui::SUI":
+      { id: "0x0fb4ad0e4c2c2b0a45d3f7bc5585cc9cea8486a63e4ef5cb768ddd9414fbb97a", isv: 488750289, coinA: "0xaafb102dd0902f5055cadecd687fb5b71ca82ef0e0285d90afde828ec58ca96b::btc::BTC", coinB: "0x2::sui::SUI", feeBps: 25 },
+    // USDC / BTC  fee=0.01% (ts=2)
+    "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC,0xaafb102dd0902f5055cadecd687fb5b71ca82ef0e0285d90afde828ec58ca96b::btc::BTC":
+      { id: "0x86f9377efc42ad60eefd1cc5238224218d11c88b9d67596383903da14807ce26", isv: 588044145, coinA: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", coinB: "0xaafb102dd0902f5055cadecd687fb5b71ca82ef0e0285d90afde828ec58ca96b::btc::BTC", feeBps: 1 },
+    // XAUm / SUI  fee=0.1% (ts=20)
+    "0x9d297676e7a4b771ab023291377b2adfaa4938fb9080b8d12430e4b108b836a9::xaum::XAUM,0x2::sui::SUI":
+      { id: "0x0df19713fb6d6f1edf70d2555ec91a5535c66bc598ffef1f4f106edb4cec6c49", isv: 627916089, coinA: "0x9d297676e7a4b771ab023291377b2adfaa4938fb9080b8d12430e4b108b836a9::xaum::XAUM", coinB: "0x2::sui::SUI", feeBps: 10 },
+    // USDC / XAUm  fee=0.01% (ts=2)
+    "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC,0x9d297676e7a4b771ab023291377b2adfaa4938fb9080b8d12430e4b108b836a9::xaum::XAUM":
+      { id: "0x58006fa34ce61c8bc99b3071627bddef47dcb8ce0ac654953a40072aa62c3a03", isv: 861375063, coinA: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", coinB: "0x9d297676e7a4b771ab023291377b2adfaa4938fb9080b8d12430e4b108b836a9::xaum::XAUM", feeBps: 1 },
+    // WBTC / SUI  fee=0.25% (ts=60)
+    "0x0041f9f9344cac094454cd574e333c4fdb132d7bcc9379bcd4aab485b2a63942::wbtc::WBTC,0x2::sui::SUI":
+      { id: "0x534c95af29a4e16bef2dcfbf7a4aa3218ceeb7ad503eeff151ccc8ff39708672", isv: 740817495, coinA: "0x0041f9f9344cac094454cd574e333c4fdb132d7bcc9379bcd4aab485b2a63942::wbtc::WBTC", coinB: "0x2::sui::SUI", feeBps: 25 },
+    // USDC / WBTC  fee=0.2% (ts=40)
+    "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC,0x0041f9f9344cac094454cd574e333c4fdb132d7bcc9379bcd4aab485b2a63942::wbtc::WBTC":
+      { id: "0xe92ee9996c49057cf2449c8c9f8d7fe52040db8229f6eb01be7d7f6bbc4fc2f3", isv: 704005945, coinA: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", coinB: "0x0041f9f9344cac094454cd574e333c4fdb132d7bcc9379bcd4aab485b2a63942::wbtc::WBTC", feeBps: 20 },
+    // suiUSDe / SUI  fee=0.25% (ts=60)
+    "0x41d587e5336f1c86cad50d38a7136db99333bb9bda91cea4ba69115defeb1402::sui_usde::SUI_USDE,0x2::sui::SUI":
+      { id: "0x1d193028646cf40c46aa2466812a27a110b0cb453b774701656bc49487f712c8", isv: 786022356, coinA: "0x41d587e5336f1c86cad50d38a7136db99333bb9bda91cea4ba69115defeb1402::sui_usde::SUI_USDE", coinB: "0x2::sui::SUI", feeBps: 25 },
+    // USDC / suiUSDe  fee=0.01% (ts=2)
+    "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC,0x41d587e5336f1c86cad50d38a7136db99333bb9bda91cea4ba69115defeb1402::sui_usde::SUI_USDE":
+      { id: "0x93372a4880cb4cbd4a9974a822c097aa36279a1dbeed7ebd7249d07b923238cf", isv: 775211034, coinA: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", coinB: "0x41d587e5336f1c86cad50d38a7136db99333bb9bda91cea4ba69115defeb1402::sui_usde::SUI_USDE", feeBps: 1 },
+    // USDSUI / SUI  fee=0.2% (ts=40)
+    "0x44f838219cf67b058f3b37907b655f226153c18e33dfcd0da559a844fea9b1c1::usdsui::USDSUI,0x2::sui::SUI":
+      { id: "0x440e5e3b13b8220c5c338bb5a4291cab5c58064eaf3654c77f3e9aed5147689c", isv: 832189237, coinA: "0x44f838219cf67b058f3b37907b655f226153c18e33dfcd0da559a844fea9b1c1::usdsui::USDSUI", coinB: "0x2::sui::SUI", feeBps: 20 },
+    // USDC / USDSUI  fee=0.01% (ts=2)
+    "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC,0x44f838219cf67b058f3b37907b655f226153c18e33dfcd0da559a844fea9b1c1::usdsui::USDSUI":
+      { id: "0xa7417fb5f59e23b0a7826d78f025653823c49265be07bbf6dd9e553ba4249a56", isv: 808620267, coinA: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", coinB: "0x44f838219cf67b058f3b37907b655f226153c18e33dfcd0da559a844fea9b1c1::usdsui::USDSUI", feeBps: 1 },
     // CETUS / SUI  fee=0.01%  (key uses NAVI's non-padded address)
     "0x6864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS,0x2::sui::SUI":
       { id: "0xdfbd4b39f65532d8b2c1136d1ddbf7dde037720067680e956076defd65753918", isv: 1964492,   coinA: "0x6864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS", coinB: "0x2::sui::SUI", feeBps: 1 },

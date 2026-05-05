@@ -78,6 +78,36 @@ function getPythClient(): SuiPythClient {
   return _pythClient;
 }
 
+// VAA cache: dedup concurrent Pyth fetch requests (TTL = 8s; valid for NAVI staleness window)
+const _vaaCache = new Map<string, { data: any; ts: number; promise?: Promise<any> }>();
+const VAA_TTL_MS = 8_000;
+
+async function fetchVaaData(feedIdList: string[]): Promise<any> {
+  const key = [...feedIdList].sort().join("|");
+  const entry = _vaaCache.get(key);
+  if (entry) {
+    if (Date.now() - entry.ts < VAA_TTL_MS) return entry.data;
+    if (entry.promise) return entry.promise;  // share in-flight request
+  }
+  const promise: Promise<any> = (async () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const data = await pythConn.getPriceFeedsUpdateData(feedIdList);
+        _vaaCache.set(key, { data, ts: Date.now() });
+        return data;
+      } catch (e: any) {
+        if (attempt < 2) { await sleep(600 * (attempt + 1)); continue; }
+        throw e;
+      }
+    }
+  })().finally(() => {
+    const cur = _vaaCache.get(key);
+    if (cur?.promise === promise) _vaaCache.set(key, { ...cur, promise: undefined });
+  });
+  _vaaCache.set(key, { data: null, ts: 0, promise });
+  return promise;
+}
+
 // Broadcast signed tx to all configured RPCs; return first success digest.
 async function broadcastTx(tx: Transaction, keypair: Ed25519Keypair): Promise<string> {
   const bytes = await tx.build({ client });
@@ -92,7 +122,10 @@ async function broadcastTx(tx: Transaction, keypair: Ed25519Keypair): Promise<st
     return r.digest;
   }
 
-  const results = await Promise.allSettled(
+  // Batch 4: race fastest-success across all broadcast RPCs (Promise.any).
+  // Returns as soon as ANY RPC confirms; doesn't wait for slow ones.
+  const t0 = Date.now();
+  const digest = await Promise.any(
     BROADCAST_RPCS.map(url =>
       new SuiClient({ url }).executeTransactionBlock({
         transactionBlock: bytes, signature, options: { showEffects: true },
@@ -103,11 +136,8 @@ async function broadcastTx(tx: Transaction, keypair: Ed25519Keypair): Promise<st
       })
     )
   );
-
-  const first = results.find(r => r.status === "fulfilled") as PromiseFulfilledResult<string> | undefined;
-  if (!first) throw new Error(results.map(r => r.status === "rejected" ? r.reason : "").join(" | "));
-  log.debug(`Broadcast to ${BROADCAST_RPCS.length} RPCs, won: ${first.value.slice(0, 16)}...`);
-  return first.value;
+  log.debug(`Broadcast race won in ${Date.now() - t0}ms: ${digest.slice(0, 16)}...`);
+  return digest;
 }
 
 // ── utilities ─────────────────────────────────────────────────────────────────
@@ -142,13 +172,10 @@ async function addOracleUpdates(tx: Transaction, ...assetIds: number[]): Promise
 
   if (pythFeeds.size > 0) {
     const feedIdList = [...pythFeeds.keys()];
-    try {
-      const updates = await pythConn.getPriceFeedsUpdateData(feedIdList);
-      await getPythClient().updatePriceFeeds(tx, updates, feedIdList);
-      log.debug(`[ORACLE] pushed Pyth VAA for ${feedIdList.length} feed(s)`);
-    } catch (e) {
-      log.warn(`[ORACLE] Pyth VAA push failed (proceeding without): ${e}`);
-    }
+    // fetchVaaData caches results for VAA_TTL_MS ms so concurrent liquidations share one request
+    const updates = await fetchVaaData(feedIdList);
+    await getPythClient().updatePriceFeeds(tx, updates, feedIdList);
+    log.debug(`[ORACLE] pushed Pyth VAA for ${feedIdList.length} feed(s)`);
   }
 
   for (const { feed } of naviFeeds) {
@@ -165,6 +192,155 @@ async function addOracleUpdates(tx: Transaction, ...assetIds: number[]): Promise
       ],
     });
   }
+}
+
+// True NAVI on-chain HF — oracle update + logic_getter_unchecked::user_health_factor.
+// This is what the official navi-sdk repo calls (NOT @naviprotocol/lending's getHealthFactor,
+// which wraps dynamic_health_factor and returns 0 for emode users).
+const NAVI_UI_GETTER = "0xa1357e2e9c28f90e76b085abb81f7ce3e59b699100687bbc3910c7e9f27bb7c8";
+
+async function getNaviHF(rpc: SuiClient, address: string, _assetIds: number[]): Promise<number> {
+  const m = await getNaviHFBatch(rpc, [address]);
+  return m.get(address) ?? NaN;
+}
+
+// Batch 2: Pyth oracle freshness pre-check. Reads arrival_time from PriceInfoObject(s).
+// Returns map of asset -> staleness seconds (Infinity if query failed).
+// Note: multiple assets can share one pioId (vSUI/haSUI/SUI), so dedup before query.
+const ORACLE_FRESHNESS_SEC = 60;
+const STALE_THRESHOLD_FOR_BUNDLE_SEC = 30;  // bundle Pyth update if oracle older than this
+async function getPythStalenessMap(rpc: SuiClient, assetIds: number[]): Promise<Map<number, number>> {
+  const map = new Map<number, number>();
+  const pioToAssets = new Map<string, number[]>();
+  for (const id of assetIds) {
+    const feed = addrs.ORACLE_PRO_FEEDS[id];
+    if (!feed?.pioId) { map.set(id, Infinity); continue; }
+    const arr = pioToAssets.get(feed.pioId) ?? [];
+    arr.push(id);
+    pioToAssets.set(feed.pioId, arr);
+  }
+  const pioIds = [...pioToAssets.keys()];
+  if (pioIds.length === 0) return map;
+  try {
+    const res = await rpc.multiGetObjects({ ids: pioIds, options: { showContent: true } });
+    const nowSec = Math.floor(Date.now() / 1000);
+    for (let i = 0; i < pioIds.length; i++) {
+      const arrival = Number((res[i]?.data?.content as any)?.fields?.price_info?.fields?.arrival_time ?? 0);
+      const stale = arrival ? nowSec - arrival : Infinity;
+      for (const a of pioToAssets.get(pioIds[i])!) map.set(a, stale);
+    }
+  } catch {
+    for (const id of assetIds) map.set(id, Infinity);
+  }
+  return map;
+}
+
+async function maxPythStalenessSec(rpc: SuiClient, assetIds: number[]): Promise<number> {
+  const m = await getPythStalenessMap(rpc, assetIds);
+  let max = 0;
+  for (const v of m.values()) max = Math.max(max, v);
+  return max;
+}
+
+// Bundle Pyth + NAVI oracle update for ALL position assets.
+// Empirically NAVI's calculate_value's staleness threshold is < 30s for some assets, so
+// selective bundling (skip "fresh" ones) fails. Always bundling adds ~10-15 PTB cmds but
+// is the only reliable way to avoid calculator 1502 on multi-asset positions.
+async function addOracleUpdatesForStale(
+  rpc: SuiClient,
+  tx: Transaction,
+  assetIds: number[],
+  _stalenessSec: Map<number, number>,
+): Promise<number> {
+  if (!addrs.ORACLE_PRO_PKG) return 0;
+  const seenFeed = new Set<string>();
+  const pythFeeds = new Map<string, number>();
+  const naviFeeds: typeof addrs.ORACLE_PRO_FEEDS[number][] = [];
+  for (const id of assetIds) {
+    const feed = addrs.ORACLE_PRO_FEEDS[id];
+    const pythFeedId = ASSETS[id]?.pyth;
+    if (!feed || seenFeed.has(feed.feedId)) continue;
+    seenFeed.add(feed.feedId);
+    if (pythFeedId) pythFeeds.set(pythFeedId, id);
+    naviFeeds.push(feed);
+  }
+  if (pythFeeds.size === 0 && naviFeeds.length === 0) return 0;
+  if (pythFeeds.size > 0) {
+    const feedIdList = [...pythFeeds.keys()];
+    const updates = await fetchVaaData(feedIdList);
+    await getPythClient().updatePriceFeeds(tx, updates, feedIdList);
+  }
+  for (const feed of naviFeeds) {
+    tx.moveCall({
+      target: `${addrs.ORACLE_PRO_PKG}::oracle_pro::update_single_price_v2`,
+      arguments: [
+        tx.object(CLOCK),
+        tx.sharedObjectRef({ objectId: addrs.ORACLE_CONFIG.id,   initialSharedVersion: addrs.ORACLE_CONFIG.isv,   mutable: true  }),
+        tx.sharedObjectRef({ objectId: addrs.PYTH_ORACLE.id,     initialSharedVersion: addrs.PYTH_ORACLE.isv,     mutable: true  }),
+        tx.sharedObjectRef({ objectId: addrs.SUPRA_HOLDER.id,    initialSharedVersion: addrs.SUPRA_HOLDER.isv,    mutable: false }),
+        tx.object(feed.pioId),
+        tx.sharedObjectRef({ objectId: addrs.SWITCHBOARD_AGG.id, initialSharedVersion: addrs.SWITCHBOARD_AGG.isv, mutable: false }),
+        tx.pure.address(feed.feedId),
+      ],
+    });
+  }
+  return naviFeeds.length;
+}
+
+// Batched NAVI HF query — single devInspect with N user_health_factor move calls.
+// 200 addrs in ~700ms. If any address triggers a Move runtime error (e.g. weird position
+// state), the entire batch fails. Fallback: bisect into halves until we isolate failures.
+const HF_BATCH_SIZE = 200;
+async function tryBatch(rpc: SuiClient, batch: string[], result: Map<string, number>): Promise<boolean> {
+  try {
+    const tx = new Transaction();
+    for (const a of batch) {
+      tx.moveCall({
+        target: `${NAVI_UI_GETTER}::logic_getter_unchecked::user_health_factor`,
+        arguments: [
+          tx.object("0x06"),
+          tx.sharedObjectRef({ objectId: addrs.NAVI_STORAGE.id, initialSharedVersion: addrs.NAVI_STORAGE.isv, mutable: true }),
+          tx.sharedObjectRef({ objectId: addrs.PYTH_ORACLE.id, initialSharedVersion: addrs.PYTH_ORACLE.isv, mutable: true }),
+          tx.pure.address(a),
+        ],
+      });
+    }
+    const r = await rpc.devInspectTransactionBlock({ transactionBlock: tx, sender: batch[0] });
+    if (r.effects?.status?.status !== "success") return false;
+    for (let j = 0; j < batch.length; j++) {
+      const rv = r.results?.[j]?.returnValues?.[0];
+      if (!rv) { result.set(batch[j], NaN); continue; }
+      const raw = BigInt("0x" + Buffer.from(rv[0]).reverse().toString("hex"));
+      const hf = Number(raw) / 1e27;
+      // HF==0 quirk: NAVI returns 0 for debt=0 (no division-by-zero protection on chain).
+      // Also: collat=0 (true bad debt). Both cases unactionable → mark NaN to exclude from
+      // any sort/display/decision logic. Real liquidatable positions always have HF in (0, 1).
+      // Healthy positions with no debt overflow to ~MAX_U256/1e27 → treat as Infinity.
+      result.set(batch[j], hf === 0 ? NaN : (hf > 1e5 ? Infinity : hf));
+    }
+    return true;
+  } catch { return false; }
+}
+
+async function getNaviHFBatch(rpc: SuiClient, addresses: string[]): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  if (addresses.length === 0) return result;
+  // Bisect on failure: if a batch fails, split in half until size 1, then mark NaN.
+  const stack: string[][] = [];
+  for (let i = 0; i < addresses.length; i += HF_BATCH_SIZE) stack.push(addresses.slice(i, i + HF_BATCH_SIZE));
+  while (stack.length > 0) {
+    const batch = stack.pop()!;
+    const ok = await tryBatch(rpc, batch, result);
+    if (!ok) {
+      if (batch.length === 1) result.set(batch[0], NaN);  // genuinely bad address
+      else {
+        const mid = Math.floor(batch.length / 2);
+        stack.push(batch.slice(0, mid));
+        stack.push(batch.slice(mid));
+      }
+    }
+  }
+  return result;
 }
 
 async function detectFrontrun(opp: LiquidationOpp, detectedAtMs: number, state: BotState): Promise<void> {
@@ -317,6 +493,63 @@ function estimateTimeToLiqSec(pos: ReturnType<BotState["positions"]["values"]> e
   return (hf0 - 1.0) / (hf0 - hf1d) * 86400;
 }
 
+// Batch 5/6: dirty-tracking for event-driven HFUpdater.
+// Reverse index: assetId -> positions holding that asset (collat or debt).
+// On any price tick (Pyth WS or on-chain Pyth event), affected positions are marked dirty.
+// HFUpdater snapshots & batches dirty positions instead of re-querying entire fastSet every loop.
+const assetToPositions = new Map<number, Set<string>>();
+const dirtyAddrs = new Set<string>();
+
+function indexPosition(addr: string, pos: { scaledCollaterals: Map<number, bigint>; scaledDebts: Map<number, bigint> }): void {
+  for (const id of pos.scaledCollaterals.keys()) {
+    if (!assetToPositions.has(id)) assetToPositions.set(id, new Set());
+    assetToPositions.get(id)!.add(addr);
+  }
+  for (const id of pos.scaledDebts.keys()) {
+    if (!assetToPositions.has(id)) assetToPositions.set(id, new Set());
+    assetToPositions.get(id)!.add(addr);
+  }
+}
+
+function markAssetDirty(assetId: number): number {
+  const set = assetToPositions.get(assetId);
+  if (!set) return 0;
+  let added = 0;
+  for (const a of set) { if (!dirtyAddrs.has(a)) { dirtyAddrs.add(a); added++; } }
+  return added;
+}
+
+// Batch 6: on-chain Pyth poller as belt-and-suspenders backup to Hermes WS.
+// Polls all configured PriceInfoObjects every 5s; if arrival_time advanced since
+// last seen, marks affected positions dirty. Catches: WS disconnects, Hermes lag,
+// edge cases where on-chain push happens without our WS receiving the corresponding feed.
+const lastSeenArrivalSec = new Map<number, number>();  // assetId -> last seen arrival_time
+function startPythChainPoller(rpc: SuiClient): () => void {
+  const tracked = Object.entries(addrs.ORACLE_PRO_FEEDS)
+    .filter(([_, f]) => !!f?.pioId)
+    .map(([id, f]) => ({ assetId: Number(id), pioId: f!.pioId }));
+  let stopped = false;
+  const loop = async () => {
+    while (!stopped) {
+      try {
+        const res = await rpc.multiGetObjects({ ids: tracked.map(t => t.pioId), options: { showContent: true } });
+        for (let i = 0; i < tracked.length; i++) {
+          const arrival = Number((res[i].data?.content as any)?.fields?.price_info?.fields?.arrival_time ?? 0);
+          if (!arrival) continue;
+          const prev = lastSeenArrivalSec.get(tracked[i].assetId) ?? 0;
+          if (arrival > prev) {
+            lastSeenArrivalSec.set(tracked[i].assetId, arrival);
+            if (prev > 0) markAssetDirty(tracked[i].assetId);  // skip first init pass
+          }
+        }
+      } catch (e) { /* ignore — next tick will retry */ }
+      await sleep(5000);
+    }
+  };
+  loop();
+  return () => { stopped = true; };
+}
+
 // ── Pyth price monitor ────────────────────────────────────────────────────────
 
 function startPythMonitor(onPrice: (assetId: number, price: number) => void) {
@@ -353,7 +586,11 @@ function startPythMonitor(onPrice: (assetId: number, price: number) => void) {
         if (!assetIds) return;
         const p     = msg.price_feed.price;
         const price = parseInt(p.price) * Math.pow(10, parseInt(p.expo));
-        for (const assetId of assetIds) onPrice(assetId, price);
+        for (const assetId of assetIds) {
+          onPrice(assetId, price);
+          // Batch 5: mark all positions touching this asset as dirty for next HF refresh.
+          markAssetDirty(assetId);
+        }
       } catch (e) { log.warn(`[PYTH] parse error: ${e}`); }
     });
     ws.on("close", () => { log.warn("Pyth WS closed, reconnecting in 3s..."); setTimeout(connect, 3000); });
@@ -438,13 +675,15 @@ async function liquidationEventMonitor(state: BotState) {
 
 // ── HF updater ────────────────────────────────────────────────────────────────
 
-function handleLiquidatable(pos: ReturnType<BotState["positions"]["values"]> extends IterableIterator<infer T> ? T : never, hf: number, state: BotState, onLiquidatable: (opp: LiquidationOpp) => void, tag: string): void {
+function handleLiquidatable(pos: ReturnType<BotState["positions"]["values"]> extends IterableIterator<infer T> ? T : never, naviHf: number, state: BotState, onLiquidatable: (opp: LiquidationOpp) => void, tag: string): void {
   const opp = state.bestLiquidation(pos);
   if (!opp) return;
   const debtSym   = state.configs.get(opp.debtAsset)?.symbol   ?? `asset_${opp.debtAsset}`;
   const collatSym = state.configs.get(opp.collatAsset)?.symbol ?? `asset_${opp.collatAsset}`;
-  log.warn(`${tag}LIQUIDATABLE ${pos.address.slice(0, 16)}... HF=${hf.toFixed(4)} profit=$${opp.profitUsd.toFixed(2)}`);
-  tg(`🔴 <b>LIQUIDATABLE</b>${tag ? " " + tag : ""}\nBorrower: <code>${opp.borrower}</code>\nHF: ${hf.toFixed(4)}\nDebt: ${debtSym} → Collat: ${collatSym}\nProfit ≈ $${opp.profitUsd.toFixed(2)}`);
+  // pos.hf was set by HFUpdater from batched user_health_factor — already correct NAVI HF.
+  const hfStr = naviHf.toFixed(4);
+  log.warn(`${tag}LIQUIDATABLE ${pos.address.slice(0, 16)}... naviHF=${hfStr} profit=$${opp.profitUsd.toFixed(2)}`);
+  tg(`🔴 <b>LIQUIDATABLE</b>${tag ? " " + tag : ""}\nBorrower: <code>${opp.borrower}</code>\nNAVI HF: ${hfStr}\nDebt: ${debtSym} → Collat: ${collatSym}\nProfit ≈ $${opp.profitUsd.toFixed(2)}`);
   onLiquidatable(opp);
 }
 
@@ -453,21 +692,42 @@ async function hfUpdater(state: BotState, onLiquidatable: (opp: LiquidationOpp) 
   let lastSlowReport  = 0;
   let reportOnFirstPrice = true;
 
+  let lastFullFastRefresh = 0;
+  const FAST_FORCED_REFRESH_MS = 30_000;  // safety net: refresh ALL fastSet every 30s
   while (true) {
     const now = Date.now();
 
-    // fast tier: every tick
-    for (const addr of state.fastSet) {
-      const pos = state.positions.get(addr);
-      if (!pos) { state.fastSet.delete(addr); continue; }
-      const hf = state.computeHF(pos);
-      pos.hf = hf;
-      pos.lastUpdated = now;
-      if (hf < 1.0) {
-        handleLiquidatable(pos, hf, state, onLiquidatable, "");
-        state.fastSet.delete(addr);
-      } else if (hf > HF_SLOW_THRESHOLD) {
-        state.fastSet.delete(addr);
+    // Batch 5: event-driven fast-tier refresh.
+    // 1) Snapshot dirtyAddrs (positions whose prices ticked since last loop).
+    // 2) Filter to fastSet members only (slow-tier dirty handled by slow sweep).
+    // 3) Periodic forced full refresh (every 30s) catches positions where Pyth tick was
+    //    missed (WS reconnect) or where rate accumulation alone moves HF below 1.
+    let toCheck: string[];
+    const forceFull = now - lastFullFastRefresh > FAST_FORCED_REFRESH_MS;
+    if (forceFull) {
+      toCheck = [...state.fastSet];
+      dirtyAddrs.clear();
+      lastFullFastRefresh = now;
+    } else {
+      toCheck = [...dirtyAddrs].filter(a => state.fastSet.has(a));
+      for (const a of toCheck) dirtyAddrs.delete(a);
+    }
+
+    if (toCheck.length > 0) {
+      const hfs = await getNaviHFBatch(client, toCheck);
+      for (const addr of toCheck) {
+        const pos = state.positions.get(addr);
+        if (!pos) { state.fastSet.delete(addr); continue; }
+        const hf = hfs.get(addr) ?? NaN;
+        if (!isFinite(hf)) continue;
+        pos.hf = hf;
+        pos.lastUpdated = now;
+        if (hf < 1.0) {
+          handleLiquidatable(pos, hf, state, onLiquidatable, "");
+          state.fastSet.delete(addr);
+        } else if (hf > HF_SLOW_THRESHOLD) {
+          state.fastSet.delete(addr);
+        }
       }
     }
 
@@ -477,7 +737,8 @@ async function hfUpdater(state: BotState, onLiquidatable: (opp: LiquidationOpp) 
       lastSlowSweep  = 0;
     }
 
-    // slow tier sweep
+    // slow tier sweep — batched naviHF for ALL non-fast positions.
+    // ~70s for 20k positions (200/batch × 700ms × 100). SLOW_INTERVAL_MS should be ≥ 90s.
     if (now - lastSlowSweep > SLOW_INTERVAL_MS) {
       lastSlowSweep = now;
       log.debug(`[SWEEP] positions=${state.positions.size} prices=${state.prices.size} nextReport=${Math.max(0, Math.round((lastSlowReport + 1_800_000 - now) / 1000))}s`);
@@ -485,9 +746,15 @@ async function hfUpdater(state: BotState, onLiquidatable: (opp: LiquidationOpp) 
       type RiskyEntry = { addr: string; hf: number; promoted: boolean };
       const risky: RiskyEntry[] = [];
 
+      const slowAddrs = [...state.positions.keys()].filter(a => !state.fastSet.has(a));
+      const slowT0 = Date.now();
+      const hfs = await getNaviHFBatch(client, slowAddrs);
+      log.debug(`[SWEEP] naviHF batch ${slowAddrs.length} addrs in ${Date.now() - slowT0}ms`);
+
       for (const [addr, pos] of state.positions) {
         if (state.fastSet.has(addr)) continue;
-        const hf     = state.computeHF(pos);
+        const hf = hfs.get(addr) ?? NaN;
+        if (!isFinite(hf)) continue;
         const prevHf = pos.hf;
         pos.hf = hf;
         pos.lastUpdated = now;
@@ -495,7 +762,7 @@ async function hfUpdater(state: BotState, onLiquidatable: (opp: LiquidationOpp) 
         if (hf < 1.0) {
           handleLiquidatable(pos, hf, state, onLiquidatable, "[slow]");
         } else if (hf <= HF_SLOW_THRESHOLD && prevHf > HF_SLOW_THRESHOLD) {
-          log.info(`Promoted ${addr.slice(0, 16)}... to fast tier (HF=${hf.toFixed(4)})`);
+          log.info(`Promoted ${addr.slice(0, 16)}... to fast tier (naviHF=${hf.toFixed(4)})`);
           state.fastSet.add(addr);
           risky.push({ addr, hf, promoted: true });
         } else if (hf < 1.15) {
@@ -524,10 +791,30 @@ async function hfUpdater(state: BotState, onLiquidatable: (opp: LiquidationOpp) 
           return d > 0 ? `${d}d ${h}h` : `${h}h ${Math.floor((sec % 3600) / 60)}m`;
         };
 
+        // pos.hf is now NAVI HF (refreshed in fast/slow tier sweeps).
+        // Filter out dust positions (debt < $5 or collat < $5) — they're real-but-uncatchable
+        // bad debt; ranking them as "lowest HF" is misleading since liquidator can't profit.
+        const positionDebtUsd = (p: UserPosition): number => {
+          let total = 0;
+          for (const [id, s] of p.scaledDebts) {
+            const px = state.prices.get(id) ?? 0;
+            total += (Number(s * liveIndex(id, "borrow") / RAY) / 1e9) * px;
+          }
+          return total;
+        };
+        const positionCollatUsd = (p: UserPosition): number => {
+          let total = 0;
+          for (const [id, s] of p.scaledCollaterals) {
+            const px = state.prices.get(id) ?? 0;
+            total += (Number(s * liveIndex(id, "supply") / RAY) / 1e9) * px;
+          }
+          return total;
+        };
         const top5Hf = [...state.positions.values()]
-          .filter(p => isFinite(p.hf))
+          .filter(p => isFinite(p.hf) && positionDebtUsd(p) >= 5 && positionCollatUsd(p) >= 5)
           .sort((a, b) => a.hf - b.hf)
-          .slice(0, 5);
+          .slice(0, 5)
+          .map(p => ({ p, naviHF: p.hf }));
 
         const top5Ttl = [...state.positions.values()]
           .filter(p => p.hf > 1.0 && p.scaledDebts.size > 0)
@@ -536,19 +823,21 @@ async function hfUpdater(state: BotState, onLiquidatable: (opp: LiquidationOpp) 
           .sort((a, b) => a.ttl - b.ttl)
           .slice(0, 5);
 
+        // Direct count from current pos.hf (slow-tier `risky` only sees promotion deltas).
+        const nearLiqCount = [...state.positions.values()].filter(p => isFinite(p.hf) && p.hf < 1.15).length;
         let msg = `📊 <b>30min Report</b> ${new Date().toISOString().slice(11, 19)} UTC\n`;
         msg += `Positions: ${total} total  |  fast=${fast}  slow=${slow}\n`;
-        msg += risky.length > 0
-          ? `⚠️ Near-liq (HF &lt; 1.15): ${risky.length}\n`
+        msg += nearLiqCount > 0
+          ? `⚠️ Near-liq (HF &lt; 1.15): ${nearLiqCount}\n`
           : `✅ No positions below HF 1.15\n`;
 
         if (top5Hf.length > 0) {
-          msg += `\n📉 <b>Lowest HF:</b>\n`;
+          msg += `\n📉 <b>Lowest NAVI HF:</b>\n`;
           for (let i = 0; i < top5Hf.length; i++) {
-            const p = top5Hf[i];
+            const { p, naviHF } = top5Hf[i];
             const debtStr   = [...p.scaledDebts.entries()].map(([id, s]) => `${state.configs.get(id)?.symbol ?? `a${id}`} ${fmtUsd(s, id, "borrow")}`).join(", ");
             const collatStr = [...p.scaledCollaterals.entries()].map(([id, s]) => `${state.configs.get(id)?.symbol ?? `a${id}`} ${fmtUsd(s, id, "supply")}`).join(", ");
-            msg += `${i + 1}. <code>${p.address.slice(0, 20)}…</code>  HF=${p.hf.toFixed(4)}\n`;
+            msg += `${i + 1}. <code>${p.address.slice(0, 20)}…</code>  naviHF=${naviHF.toFixed(4)}\n`;
             msg += `   💸 ${debtStr}\n`;
             msg += `   💰 ${collatStr}\n`;
           }
@@ -569,17 +858,20 @@ async function hfUpdater(state: BotState, onLiquidatable: (opp: LiquidationOpp) 
           .then(valMsg => tg(msg + valMsg))
           .catch(() => tg(msg));
         log.info(`[30MIN-REPORT] total=${total} fast=${fast} slow=${slow} near-liq=${risky.length}` +
-          (top5Hf[0] ? ` lowest-HF=${top5Hf[0].hf.toFixed(4)} (${top5Hf[0].address.slice(0, 16)}...)` : ""));
+          (top5Hf[0] ? ` lowest-HF=${top5Hf[0].naviHF.toFixed(4)} (${top5Hf[0].p.address.slice(0, 16)}...)` : ""));
       }
     }
 
-    await sleep(50);
+    // Tight loop: fast tier batch naviHF takes ~200-700ms by itself; no extra sleep needed
+    // when fastSet has positions. Sleep 200ms when fastSet empty to avoid busy-wait.
+    if (state.fastSet.size === 0) await sleep(200);
   }
 }
 
 // ── liquidator ────────────────────────────────────────────────────────────────
 
 async function liquidator(state: BotState, opp: LiquidationOpp, keypair: Ed25519Keypair | null) {
+  const t0 = Date.now();
   const debtSym    = state.configs.get(opp.debtAsset)?.symbol   ?? `a${opp.debtAsset}`;
   const collatSym  = state.configs.get(opp.collatAsset)?.symbol ?? `a${opp.collatAsset}`;
   const debtCfg    = state.configs.get(opp.debtAsset);
@@ -587,20 +879,27 @@ async function liquidator(state: BotState, opp: LiquidationOpp, keypair: Ed25519
   const debtPrice  = state.prices.get(opp.debtAsset) ?? 0;
   const repayUsd   = Number(opp.repayAmount) / 10 ** (debtCfg?.tokenDec ?? 9) * debtPrice;
   const receiveUsd = repayUsd * (1 + (collatCfg?.liqBonus ?? 0));
-  const caseTag    = opp.source === "wallet" ? "Case2 wallet" : `Case1 ${opp.source}`;
+  const caseTag    = `Case1 ${opp.source}`;
   const collatPrice = state.prices.get(opp.collatAsset) ?? 0;
   const receiveAmt  = collatPrice > 0 ? (receiveUsd / collatPrice).toFixed(4) : "?";
   const repayHuman  = (Number(opp.repayAmount) / 10 ** (debtCfg?.tokenDec ?? 9)).toFixed(4);
-  const oppSummary =
-    `[${opp.source}] ${debtSym}→${collatSym}  HF=${opp.hf.toFixed(3)}\n` +
+  const buildSummary = (hf: number) =>
+    `[${opp.source}] ${debtSym}→${collatSym}  naviHF=${hf.toFixed(3)}\n` +
     `  repay:     ${repayHuman} ${debtSym} (~$${repayUsd.toFixed(4)})\n` +
     `  receive:   ${receiveAmt} ${collatSym} ($${receiveUsd.toFixed(4)})  (bonus ${((collatCfg?.liqBonus ?? 0)*100).toFixed(1)}%)\n` +
-    `  ──────────────────────────────\n` +
-    `  liqBonus:  +$${opp.grossProfitUsd.toFixed(4)}\n` +
-    `  cetusFee:   -$${opp.cetusFeeUsd.toFixed(4)}\n` +
-    `  gas:        -$${opp.gasCostUsd.toFixed(6)}\n` +
-    `  ──────────────────────────────\n` +
-    `  NET:        $${opp.profitUsd.toFixed(4)}  ✅ ≥ $${MIN_PROFIT_USD}`;
+    `  liqBonus: +$${opp.grossProfitUsd.toFixed(4)}  cetusFee: -$${opp.cetusFeeUsd.toFixed(4)}  net≈$${opp.profitUsd.toFixed(4)}`;
+
+  const pos = state.positions.get(opp.borrower);
+  if (!pos) {
+    log.debug(`Skip ${opp.borrower.slice(0, 16)}...: position vanished from store`);
+    return;
+  }
+  const allPositionAssets = [...pos.scaledCollaterals.keys(), ...pos.scaledDebts.keys()];
+
+  // pos.hf was set by HFUpdater from batched user_health_factor — already authoritative.
+  // No second devInspect — saves ~700ms of RTT (was the biggest hot-path overhead).
+  const naviHF = isFinite(pos.hf) ? pos.hf : opp.hf;
+  const oppSummary = buildSummary(naviHF);
 
   if (DRY_RUN) {
     const detectedAt = Date.now();
@@ -615,49 +914,40 @@ async function liquidator(state: BotState, opp: LiquidationOpp, keypair: Ed25519
     return;
   }
 
-  const pos = state.positions.get(opp.borrower);
-  if (!pos || pos.hf >= 1.0) {
-    log.debug(`Skip ${opp.borrower.slice(0, 16)}...: local HF recovered to ${pos?.hf.toFixed(4)}`);
+  if (!isFinite(naviHF) || naviHF >= 1.0) {
+    log.debug(`Skip ${opp.borrower.slice(0, 16)}...: naviHF=${isFinite(naviHF) ? naviHF.toFixed(4) : "NaN"} (recovered)`);
     return;
   }
 
   try {
-    const tx = await buildLiquidationTx(opp as LiqOpp, keypair, addrs, client, opp.source, addOracleUpdates);
+    const { client: rpc, url: rpcUrl } = scanPool.next();
 
-    // ── gas pre-flight: devInspect to get real cost before committing ──────────
-    const refGasPrice = BigInt(await client.getReferenceGasPrice());
-    const inspect = await client.devInspectTransactionBlock({
-      transactionBlock: tx,
-      sender: keypair.getPublicKey().toSuiAddress(),
-      gasPrice: refGasPrice.toString(),
-    });
-    if (inspect.effects.status.status !== "success") {
-      log.error(`[PREFLIGHT FAIL ${caseTag}] ${opp.borrower.slice(0, 20)}... devInspect failed: ${JSON.stringify(inspect.effects.status)}`);
-      tg(`⚠️ <b>PREFLIGHT FAIL [${caseTag}]</b>\nBorrower: <code>${opp.borrower}</code>\n${oppSummary}\n${JSON.stringify(inspect.effects.status).slice(0, 200)}`);
-      return;
-    }
-    const gu = inspect.effects.gasUsed;
-    // At 1.5× gas price: compute cost scales, storage stays fixed
-    const computeMist = BigInt(gu.computationCost);
-    const actualMist  = (computeMist * 3n / 2n) + BigInt(gu.storageCost) - BigInt(gu.storageRebate);
-    const suiPrice    = state.prices.get(0) ?? 1;
-    const gasUsd      = (Number(actualMist) / 1e9) * suiPrice;
-    const netProfitUsd = opp.profitUsd - gasUsd;
-    log.info(`[PREFLIGHT OK] gas=${actualMist}MIST(1.5×) ≈$${gasUsd.toFixed(4)} gross=$${opp.profitUsd.toFixed(4)} net=$${netProfitUsd.toFixed(4)}`);
-    if (netProfitUsd <= MIN_PROFIT_USD) {
-      log.warn(`[SKIP] Net profit $${netProfitUsd.toFixed(4)} ≤ MIN_PROFIT_USD after gas — skipping`);
-      return;
-    }
-    // Set gas budget from actual measurement (2× for safety headroom)
-    tx.setGasBudget(actualMist * 2n);
+    // Per-asset freshness check on ALL position assets (NAVI's calculate_value reads each).
+    // 1502 errors come from long-tail assets (NAVX/CETUS/HAEDAL) with infrequent Pyth pushes.
+    // Selective bundle: only stale (>30s) assets get Pyth update bundled in TX.
+    const stalenessMap = await getPythStalenessMap(rpc, allPositionAssets);
 
+    const FAST_GAS_BUDGET_MIST = 50_000_000n;
+    const tx = await buildLiquidationTx(
+      opp as LiqOpp, keypair, addrs, rpc, opp.source,
+      async (t) => { await addOracleUpdatesForStale(rpc, t, allPositionAssets, stalenessMap); }
+    );
+    tx.setGasBudget(FAST_GAS_BUDGET_MIST);
+
+    const tBuild = Date.now() - t0;
     const digest = await broadcastTx(tx, keypair);
-    log.info(`[TX SUCCESS ${caseTag}] ${digest} | borrower=${opp.borrower.slice(0, 20)}... | gross=$${opp.profitUsd.toFixed(2)} net≈$${netProfitUsd.toFixed(2)}`);
-    tg(`✅ <b>TX SUCCESS [${caseTag}]</b>\n<a href="https://suiscan.xyz/mainnet/tx/${digest}">${digest.slice(0, 20)}...</a>\nBorrower: <code>${opp.borrower}</code>\n${oppSummary}\nNet ≈ $${netProfitUsd.toFixed(2)}`);
+    const tTotal = Date.now() - t0;
+    log.info(`[TX SUCCESS ${caseTag}] ${digest} | borrower=${opp.borrower.slice(0, 20)}... | gross≈$${opp.profitUsd.toFixed(2)} | ${tBuild}ms→build, ${tTotal}ms→total`);
+    tg(`✅ <b>TX SUCCESS [${caseTag}]</b>\n<a href="https://suiscan.xyz/mainnet/tx/${digest}">${digest.slice(0, 20)}...</a>\nBorrower: <code>${opp.borrower}</code>\n${oppSummary}\nLatency: ${tTotal}ms`);
     state.positions.delete(opp.borrower);
     state.fastSet.delete(opp.borrower);
-  } catch (e) {
+  } catch (e: any) {
     const detectedAt = Date.now();
+    const is429 = e?.status === 429 || String(e).includes("429");
+    if (is429) {
+      const { url: rpcUrl } = scanPool.next();
+      scanPool.markError(rpcUrl, true, msg => log.warn(msg));
+    }
     log.error(`[TX FAILED] ${opp.borrower.slice(0, 20)}...:`, e);
     tg(`❌ <b>TX FAILED</b>\nBorrower: <code>${opp.borrower}</code>\n${String(e).slice(0, 200)}`);
     detectFrontrun(opp, detectedAt, state).catch(() => {});
@@ -693,6 +983,7 @@ async function main() {
 
   const state = new BotState();
   await withRetry(() => loadAssetConfigs(state, client, addrs, log));
+  state.loadCetusFees(addrs.CETUS_POOLS);
 
   // Seed prices from NAVI on-chain oracle for non-Pyth assets (NS, DEEP, BLUE, BUCK, LBTC, etc.)
   // Pyth WS will overwrite Pyth-covered assets as soon as it connects; oracle prices serve as
@@ -715,12 +1006,46 @@ async function main() {
     log.info("[CACHE] Starting background full scan...");
   }
 
+  // Batch 5: build asset->positions reverse index for event-driven HF refresh.
+  for (const [addr, pos] of state.positions) indexPosition(addr, pos);
+  log.info(`[INDEX] Built asset->positions index for ${assetToPositions.size} assets`);
+
+  // Batch 6: start on-chain Pyth freshness poller (5s interval) — backup to Hermes WS.
+  startPythChainPoller(client);
+  log.info("[PYTH] On-chain price-feed poller started (5s interval)");
+
+  // 100% HF alignment: replace ALL pos.hf with batched user_health_factor result.
+  // Local computeHF was used to populate pos.hf during cache load and scan; this overwrites
+  // those approximate values with the authoritative on-chain HF. Re-evaluate fastSet too.
+  const realignAllHF = async (label: string) => {
+    const t0 = Date.now();
+    const addrsToCheck = [...state.positions.keys()];
+    const hfs = await getNaviHFBatch(client, addrsToCheck);
+    let updated = 0, addedFast = 0, removedFast = 0;
+    for (const [addr, pos] of state.positions) {
+      const hf = hfs.get(addr);
+      if (hf === undefined || !isFinite(hf)) continue;
+      pos.hf = hf;
+      pos.lastUpdated = Date.now();
+      updated++;
+      const inFast = state.fastSet.has(addr);
+      if (hf <= HF_SLOW_THRESHOLD && !inFast) { state.fastSet.add(addr); addedFast++; }
+      else if (hf > HF_SLOW_THRESHOLD && inFast) { state.fastSet.delete(addr); removedFast++; }
+    }
+    log.info(`[HF-ALIGN ${label}] ${updated}/${addrsToCheck.length} positions in ${Date.now() - t0}ms (fastSet +${addedFast} -${removedFast}, now=${state.fastSet.size})`);
+  };
+  // Run alignment after cache load (don't block startup; happens in background).
+  realignAllHF("startup").catch(e => log.warn("[HF-ALIGN] startup failed:", e));
+
   // Background scan: refreshes/prunes whether or not cache was loaded.
-  // Runs once at startup, then every 30 min via startPositionRefresher.
   withRetry(() => loadPositions(state, scanPool, addrs, log))
-    .then(() => {
+    .then(async () => {
+      // Re-index after scan to catch any newly discovered positions.
+      for (const [addr, pos] of state.positions) indexPosition(addr, pos);
+      // 100% HF alignment after scan — overwrites local-computeHF values with naviHF.
+      await realignAllHF("post-scan");
       savePositionsCache(state, log);
-      log.info(`[CACHE] Background scan done: ${state.positions.size} positions`);
+      log.info(`[CACHE] Background scan done: ${state.positions.size} positions, asset index has ${assetToPositions.size} entries`);
     })
     .catch(e => log.warn("[CACHE] Background scan failed:", e));
 

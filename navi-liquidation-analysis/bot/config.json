@@ -1,0 +1,24 @@
+{
+  "dry_run": false,
+  "min_profit_usd": 0.05,
+  "max_slippage_bps": 50,
+  "gas_wallet_mist": 10000,
+  "gas_flash_mist": 150000000,
+  "gas_budget_mist": 300000000,
+  "hf_slow_threshold": 1.5,
+  "slow_interval_ms": 600000,
+  "auto_swap": true,
+  "sui_rpcs": [
+    "https://fullnode.mainnet.sui.io",
+    "https://api-sui-mainnet-full.n.dwellir.com/6c6398c2-2857-4ad5-baaf-5d17c3ad6288",
+    "https://sui-mainnet-endpoint.blockvision.org",
+    "https://sui-rpc.publicnode.com",
+    "https://sui-mainnet.public.blastapi.io",
+    "https://rpc-mainnet.suiscan.xyz",
+    "https://mainnet.suiet.app",
+    "https://sui-mainnet.blockvision.org/v1/3DCl65x2VvZDzcU28cuja4bWztK"
+  ],
+  "telegram_token": "8565644596:AAFS2LOQ4a8QdJUbWgBTc6e_HuWP6Jno93c",
+  "telegram_chat": "1338361209",
+  "bot_key": "218c9401303229e2c8d478043f4cac08577a4370ba70cfa57fee5b8864ce9bb0"
+}

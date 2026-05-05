@@ -11,7 +11,7 @@
 import { SuiClient }            from "@mysten/sui/client";
 import { writeFileSync, readFileSync } from "fs";
 import {
-  ASSETS, RAY, HF_SLOW_THRESHOLD, GAS_WALLET_MIST, GAS_FLASH_MIST, MIN_PROFIT_USD,
+  ASSETS, RAY, HF_SLOW_THRESHOLD, GAS_WALLET_MIST, GAS_FLASH_MIST, GAS_WALLET_SWAP_MIST, MIN_PROFIT_USD,
   AUTO_SWAP, MAX_SLIPPAGE_BPS,
 } from "./config.js";
 import { RpcPool } from "./network.js";
@@ -78,6 +78,10 @@ const NAVI_INTERNAL_DEC = 9;
 
 // Asset IDs whose Pool.balance is depleted — deposit_treasury will abort (error 1506).
 // wUSDC (asset 1) pool balance is ~$0.008; cannot support any treasury fee.
+// Asset 1 = whUSDC (Wormhole USDC, `0x5d4b302...::coin::COIN`). Confirmed depleted by
+// devInspect 2026-05-04: liquidation_v2 fails at pool::deposit_treasury with error 1506.
+// Distinct from asset 10 (native USDC, `0xdba34672...::usdc::USDC`) which works fine —
+// the chain stats showing "USDC→*" liquidations are native USDC (asset 10), not whUSDC.
 const DEPLETED_COLLAT_POOLS = new Set([1]);
 
 // ── reserve index cache (module-level, shared within process) ─────────────────
@@ -135,31 +139,44 @@ export class BotState {
       if (!this.configs.has(id)) return Infinity;
     }
     let collatValue = 0;
+    const collatDebug: string[] = [];
     for (const [id, scaled] of pos.scaledCollaterals) {
       const cfg   = this.configs.get(id)!;
       const price = this.prices.get(id);
       // Missing price → can't compute HF; treat as unknown/safe to avoid false alerts.
       if (!price) return Infinity;
-      const actual = Number(scaled * liveIndex(id, "supply") / RAY) / 10 ** NAVI_INTERNAL_DEC;
-      collatValue += actual * price * cfg.liqThreshold;
+      const idx    = liveIndex(id, "supply");
+      const actual = Number(scaled * idx / RAY) / 10 ** NAVI_INTERNAL_DEC;
+      const contrib = actual * price * cfg.liqThreshold;
+      collatValue += contrib;
+      collatDebug.push(`collat[${id}] scaled=${scaled} idx=${idx} actual=${actual.toFixed(4)} px=${price} liqThr=${cfg.liqThreshold} contrib=${contrib.toFixed(4)}`);
     }
     let debtValue = 0;
+    const debtDebug: string[] = [];
     for (const [id, scaled] of pos.scaledDebts) {
       const cfg   = this.configs.get(id)!;
       const price = this.prices.get(id);
       if (!price) return Infinity;
-      const actual = Number(scaled * liveIndex(id, "borrow") / RAY) / 10 ** NAVI_INTERNAL_DEC;
-      debtValue += actual * price;
+      const idx    = liveIndex(id, "borrow");
+      const actual = Number(scaled * idx / RAY) / 10 ** NAVI_INTERNAL_DEC;
+      const contrib = actual * price;
+      debtValue += contrib;
+      debtDebug.push(`debt[${id}] scaled=${scaled} idx=${idx} actual=${actual.toFixed(4)} px=${price} contrib=${contrib.toFixed(4)}`);
     }
-    return debtValue === 0 ? Infinity : collatValue / debtValue;
+    const hf = debtValue === 0 ? Infinity : collatValue / debtValue;
+    if (hf < 0.5 && hf !== Infinity) {
+      const ts = new Date().toISOString();
+      console.log(`[computeHF DEBUG ${ts}] addr=${pos.address.slice(0,16)} HF=${hf.toFixed(4)}`);
+      for (const l of collatDebug) console.log(`  ${l}`);
+      for (const l of debtDebug)   console.log(`  ${l}`);
+    }
+    return hf;
   }
 
   bestLiquidation(pos: UserPosition, minProfit = MIN_PROFIT_USD): LiquidationOpp | null {
     const suiPrice = this.prices.get(0) ?? 1;
-    // Maintain separate bests: flash loan (capital-efficient) has execution priority.
-    // After scanning all pairs, return bestFlash if found, else bestWallet.
+    // Batch 3: 041c-style — only cetus flash (direct + multi-hop). No wallet, no wallet-swap.
     let bestFlash:  LiquidationOpp | null = null;
-    let bestWallet: LiquidationOpp | null = null;
 
     for (const [debtId, scaled] of pos.scaledDebts) {
       const debtCfg   = this.configs.get(debtId);
@@ -238,58 +255,12 @@ export class BotState {
           }
         }
 
-        // ── Wallet-swap (auto_swap=true): buy debt with wallet SUI via Cetus ──
-        // Fires only when no flash path is available (no direct or multi-hop pool).
-        // Requires debt/SUI Cetus pool. collat/SUI pool is optional (if missing, collat kept as-is).
-        if (AUTO_SWAP && debtCoinType !== suiCoinType) {
-          const borrowFeeBps = cetusFeeBps(debtCoinType, suiCoinType);
-          if (borrowFeeBps !== undefined) {
-            // No existing flash path should already cover this (cetus-multi requires both pools).
-            const swapFeeBps     = cetusFeeBps(collatCoinType, suiCoinType);
-            const slipFrac       = MAX_SLIPPAGE_BPS / 10000;
-            // Fee on buying debt: charged on debt value
-            const borrowFeeUsd   = repayUsd * borrowFeeBps / 10000;
-            // Slippage cost on buy side
-            const buySlipUsd     = repayUsd * slipFrac;
-            // Fee + slippage on selling collat (only if collat/SUI pool exists)
-            const sellFeeUsd     = swapFeeBps !== undefined
-              ? receivedUsd * swapFeeBps / 10000 + receivedUsd * slipFrac
-              : 0;
-            const gasCostUsd     = (Number(GAS_FLASH_MIST) / 1e9) * suiPrice;
-            const cetusFeeUsd    = borrowFeeUsd + buySlipUsd + sellFeeUsd;
-            const profitUsd      = grossProfitUsd - cetusFeeUsd - gasCostUsd;
-            if (profitUsd > minProfit && (!bestFlash || profitUsd > bestFlash.profitUsd)) {
-              // minSuiOut: conservative SUI floor for the collat→SUI flash swap
-              const minSuiOut = swapFeeBps !== undefined
-                ? BigInt(Math.floor(
-                    receivedUsd / suiPrice
-                    * (1 - swapFeeBps / 10000)
-                    * (1 - slipFrac)
-                    * 1e9
-                  ))
-                : 0n;
-              bestFlash = {
-                borrower: pos.address, debtAsset: debtId, collatAsset: collatId,
-                repayAmount: repayRaw, source: "wallet-swap",
-                grossProfitUsd, cetusFeeUsd, gasCostUsd, profitUsd, hf: pos.hf,
-                minSuiOut,
-              };
-            }
-          }
-        }
-
-        // ── Wallet fallback: requires holding debt coin, negligible gas ────────
-        {
-          const walletGasUsd = (Number(GAS_WALLET_MIST) / 1e9) * suiPrice;
-          const profitUsd    = grossProfitUsd - walletGasUsd;
-          if (profitUsd > minProfit && (!bestWallet || profitUsd > bestWallet.profitUsd)) {
-            bestWallet = { borrower: pos.address, debtAsset: debtId, collatAsset: collatId, repayAmount: repayRaw, source: "wallet", grossProfitUsd, cetusFeeUsd: 0, gasCostUsd: walletGasUsd, profitUsd, hf: pos.hf };
-          }
-        }
+        // Batch 3: 041c-style — only zero-capital cetus flash routes (direct + multi-hop).
+        // Wallet / wallet-swap modes removed: capital cost + adds PTB complexity for
+        // marginal extra opportunities. Pure flash-loan only matches the 100%-hit pattern.
       }
     }
-    // Flash loan has execution priority; wallet is fallback
-    return bestFlash ?? bestWallet ?? null;
+    return bestFlash;
   }
 }
 
@@ -419,15 +390,14 @@ export async function loadUserPosition(
     if (pos.scaledDebts.size === 0) return;  // balance confirmed empty on-chain
 
     pos.lastUpdated = Date.now();
-    pos.hf = state.computeHF(pos);
-    // Snapshot prices at the exact moment this position was loaded.
-    // During long scans (init_bot), prices drift — per-position snapshot makes
-    // the saved HF and the cache px field accurate for later comparison.
+    // 100% match policy: pos.hf is set ONLY by batched user_health_factor downstream.
+    // Leave Infinity here — naviHF realign will populate the real value within ~10s.
+    pos.hf = Infinity;
     if (state.prices.size > 0) {
       pos.savedPx = Object.fromEntries(state.prices) as Record<number, number>;
     }
     state.positions.set(address, pos);
-    if (pos.hf <= HF_SLOW_THRESHOLD) state.fastSet.add(address);
+    // fastSet membership is decided after naviHF realign (not at scan time).
   } catch {
     // silent — individual position failures are expected
   }
@@ -775,10 +745,9 @@ export async function loadPositionsFromCache(
         hf:          Infinity,
         lastUpdated: e.ts ?? Date.now(),
       };
-      pos.hf = state.computeHF(pos);
+      // 100% match policy: leave hf=Infinity, naviHF realign will populate.
       state.positions.set(e.a, pos);
       state.triedAddresses.add(e.a);
-      if (pos.hf <= HF_SLOW_THRESHOLD) state.fastSet.add(e.a);
     }
     return entries.length;
   } catch {
